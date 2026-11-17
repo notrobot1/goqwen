@@ -21,10 +21,10 @@ import (
 	"fmt"
 	"runtime"
 
-	"goqwen/internal/gguf"
-	"goqwen/internal/nn"
-	"goqwen/internal/tokenizer"
-	"goqwen/vec"
+	"github.com/notrobot1/goqwen/goqwen/internal/gguf"
+	"github.com/notrobot1/goqwen/goqwen/internal/nn"
+	"github.com/notrobot1/goqwen/goqwen/internal/tokenizer"
+	"github.com/notrobot1/goqwen/goqwen/vec"
 )
 
 // Options — параметры загрузки модели. Нулевое значение (или nil) годится.
