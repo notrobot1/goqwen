@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"math"
 
-	"goqwen/internal/gguf"
+	"github.com/notrobot1/goqwen/goqwen/internal/gguf"
 )
 
 // Config — гиперпараметры модели из метаданных GGUF.
