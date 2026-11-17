@@ -6,7 +6,7 @@ import (
 	"sort"
 	"time"
 
-	"goqwen/vec"
+	"github.com/notrobot1/goqwen/goqwen/vec"
 )
 
 // Sampling — параметры выбора следующего токена.
