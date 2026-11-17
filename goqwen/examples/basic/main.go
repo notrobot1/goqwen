@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"log"
 
-	"goqwen"
+	"github.com/notrobot1/goqwen/goqwen"
 )
 
 func main() {
