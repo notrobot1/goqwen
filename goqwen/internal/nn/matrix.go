@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"unsafe"
 
-	"goqwen/internal/gguf"
-	"goqwen/vec"
+	"github.com/notrobot1/goqwen/goqwen/internal/gguf"
+	"github.com/notrobot1/goqwen/goqwen/vec"
 )
 
 // Matrix — матрица весов rows×cols, хранящаяся построчно либо как float32,
