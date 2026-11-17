@@ -4,7 +4,7 @@ import (
 	"errors"
 	"math"
 
-	"goqwen/vec"
+	"github.com/notrobot1/goqwen/goqwen/vec"
 )
 
 // ErrContextFull возвращается, когда в окне контекста не осталось места.
