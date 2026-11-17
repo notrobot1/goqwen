@@ -9,7 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"goqwen/internal/nn"
+	"github.com/notrobot1/goqwen/goqwen/internal/nn"
 )
 
 // ErrContextOverflow возвращается, когда промпт не помещается в окно
