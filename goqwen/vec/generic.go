@@ -19,6 +19,18 @@ func dotGeneric(a, b []float32) float32 {
 	return (s0 + s1) + (s2 + s3)
 }
 
+func rotateHalfGeneric(x, cos, sin []float32) {
+	half := len(cos)
+	lo, hi := x[:half], x[half:2*half]
+	sin = sin[:half]
+	for i, c := range cos {
+		s := sin[i]
+		a, b := lo[i], hi[i]
+		lo[i] = a*c - b*s
+		hi[i] = b*c + a*s
+	}
+}
+
 func axpyGeneric(alpha float32, x, y []float32) {
 	y = y[:len(x)]
 	for i, v := range x {
