@@ -20,10 +20,11 @@ import (
 // Активные реализации ядер. По умолчанию — переносимые; init() конкретной
 // архитектуры заменяет их на оптимизированные.
 var (
-	dotImpl   func(a, b []float32) float32          = dotGeneric
-	axpyImpl  func(alpha float32, x, y []float32)   = axpyGeneric
-	dotQ8Impl func(row []byte, x []float32) float32 = dotQ8Generic
-	levelName                                       = "generic"
+	dotImpl          func(a, b []float32) float32          = dotGeneric
+	axpyImpl         func(alpha float32, x, y []float32)   = axpyGeneric
+	dotQ8Impl        func(row []byte, x []float32) float32 = dotQ8Generic
+	rotateHalfImpl   func(x, cos, sin []float32)           = rotateHalfGeneric
+	levelName                                              = "generic"
 	// q8Direct: есть ли прямое SIMD-ядро для строк Q8_0 (без распаковки).
 	q8Direct = false
 	levels   = map[string]func(){"generic": useGeneric}
@@ -31,6 +32,7 @@ var (
 
 func useGeneric() {
 	dotImpl, axpyImpl, dotQ8Impl = dotGeneric, axpyGeneric, dotQ8Generic
+	rotateHalfImpl = rotateHalfGeneric
 	q8Direct = false
 	levelName = "generic"
 }
@@ -140,15 +142,7 @@ func SiLUMul(g, u []float32) {
 // длины 2*len(cos): пара (x[i], x[i+half]) поворачивается на угол с косинусом
 // cos[i] и синусом sin[i].
 func RotateHalf(x, cos, sin []float32) {
-	half := len(cos)
-	lo, hi := x[:half], x[half:2*half]
-	sin = sin[:half]
-	for i, c := range cos {
-		s := sin[i]
-		a, b := lo[i], hi[i]
-		lo[i] = a*c - b*s
-		hi[i] = b*c + a*s
-	}
+	rotateHalfImpl(x, cos, sin)
 }
 
 // ArgMax возвращает индекс максимального элемента.
