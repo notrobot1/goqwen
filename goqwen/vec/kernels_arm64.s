@@ -27,6 +27,54 @@ dot_loop:
 	VST1 [V0.S4, V1.S4, V2.S4, V3.S4], (R3)
 	RET
 
+// func rotateHalfNEON(xlo, xhi, cos, sin *float32, n int)
+// Применяет RoPE к n элементам (кратно 8):
+//   xlo[i] = a*c - b*s,  xhi[i] = b*c + a*s
+// Обрабатывает 8 элементов за итерацию (4 независимых цепочки),
+// чтобы скрыть 4-цикловый latency VFMLA на Apple M-серии.
+TEXT ·rotateHalfNEON(SB), NOSPLIT, $0-40
+	MOVD xlo+0(FP), R0
+	MOVD xhi+8(FP), R1
+	MOVD cos+16(FP), R2
+	MOVD sin+24(FP), R3
+	MOVD n+32(FP), R4
+
+rope_loop:
+	// Загрузить 8 элементов из каждого массива.
+	// xlo/xhi — без инкремента (запись пойдёт через VST1.P);
+	// cos/sin — с пост-инкрементом (читаются один раз).
+	VLD1 (R0), [V0.S4, V1.S4]       // a0 = xlo[0..3], a1 = xlo[4..7]
+	VLD1 (R1), [V2.S4, V3.S4]       // b0 = xhi[0..3], b1 = xhi[4..7]
+	VLD1.P 32(R2), [V4.S4, V5.S4]   // c0, c1
+	VLD1.P 32(R3), [V6.S4, V7.S4]   // s0, s1
+
+	// Четыре независимых аккумулятора — OOO-ядро M1 выполняет их параллельно.
+	VEOR V8.B16, V8.B16, V8.B16     // new_a0 = 0
+	VEOR V9.B16, V9.B16, V9.B16     // new_a1 = 0
+	VEOR V10.B16, V10.B16, V10.B16  // new_b0 = 0
+	VEOR V11.B16, V11.B16, V11.B16  // new_b1 = 0
+
+	// Первый проход: все четыре цепочки стартуют одновременно.
+	VFMLA V4.S4, V0.S4, V8.S4   // V8  = a0*c0
+	VFMLA V5.S4, V1.S4, V9.S4   // V9  = a1*c1
+	VFMLA V4.S4, V2.S4, V10.S4  // V10 = b0*c0
+	VFMLA V5.S4, V3.S4, V11.S4  // V11 = b1*c1
+
+	// Второй проход: завершает каждую цепочку.
+	VFMLS V6.S4, V2.S4, V8.S4   // V8  = a0*c0 - b0*s0
+	VFMLS V7.S4, V3.S4, V9.S4   // V9  = a1*c1 - b1*s1
+	VFMLA V6.S4, V0.S4, V10.S4  // V10 = b0*c0 + a0*s0
+	VFMLA V7.S4, V1.S4, V11.S4  // V11 = b1*c1 + a1*s1
+
+	// Запись: пост-инкремент продвигает R0/R1 на 32 байта.
+	VST1.P [V8.S4, V9.S4], 32(R0)
+	VST1.P [V10.S4, V11.S4], 32(R1)
+
+	SUBS $8, R4, R4
+	BNE  rope_loop
+
+	RET
+
 // func axpyNEON(alpha float32, x, y *float32, n int)
 // n > 0, кратно 8.
 TEXT ·axpyNEON(SB), NOSPLIT, $0-32
