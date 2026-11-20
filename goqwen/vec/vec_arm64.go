@@ -18,15 +18,42 @@ func dotNEON(a, b *float32, n int, acc *[16]float32)
 //go:noescape
 func axpyNEON(alpha float32, x, y *float32, n int)
 
+// rotateHalfNEON применяет RoPE к n элементам (n > 0, кратно 4).
+//
+//go:noescape
+func rotateHalfNEON(xlo, xhi, cos, sin *float32, n int)
+
 func init() {
 	levels["neon"] = func() {
 		dotImpl = dotNeon
 		axpyImpl = axpyNeon
 		dotQ8Impl = dotQ8Generic
-		q8Direct = false // строка распаковывается, затем NEON-произведение
+		q8Direct = false
+		rotateHalfImpl = rotateHalfNeon
 		levelName = "neon"
 	}
 	levels["neon"]()
+}
+
+func rotateHalfNeon(x, cos, sin []float32) {
+	half := len(cos)
+	n := half &^ 7 // округлить вниз до кратного 8
+	if n > 0 {
+		rotateHalfNEON(
+			unsafe.SliceData(x),
+			unsafe.SliceData(x[half:]),
+			unsafe.SliceData(cos),
+			unsafe.SliceData(sin),
+			n,
+		)
+	}
+	// хвост (если half не кратно 8)
+	hi := x[half : 2*half]
+	for i := n; i < half; i++ {
+		a, b, c, s := x[i], hi[i], cos[i], sin[i]
+		x[i] = a*c - b*s
+		hi[i] = b*c + a*s
+	}
 }
 
 func dotNeon(a, b []float32) float32 {
