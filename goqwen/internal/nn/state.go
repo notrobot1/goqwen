@@ -20,10 +20,12 @@ type State struct {
 	kc, vc [][]float32
 
 	x, h, q, att, o, g, u []float32
-	cos, sin              []float32
-	scores                [][]float32
-	scratch               [][]float32
-	logits                []float32
+	// cosTable, sinTable: предвычисленные тригонометрические значения для RoPE.
+	// Размер: maxCtx × (HeadDim/2) float32. Индекс: [pos*half + i].
+	cosTable, sinTable []float32
+	scores             [][]float32
+	scratch            [][]float32
+	logits             []float32
 }
 
 // NewState создаёт состояние с окном контекста maxCtx токенов.
@@ -39,16 +41,27 @@ func (m *Model) NewState(maxCtx int) *State {
 		o:       make([]float32, m.Dim),
 		q:       make([]float32, m.Heads*m.HeadDim),
 		att:     make([]float32, m.Heads*m.HeadDim),
-		g:       make([]float32, m.FF),
-		u:       make([]float32, m.FF),
-		cos:     make([]float32, m.HeadDim/2),
-		sin:     make([]float32, m.HeadDim/2),
-		scores:  make([][]float32, t),
+		g:      make([]float32, m.FF),
+		u:      make([]float32, m.FF),
+		scores: make([][]float32, t),
 		scratch: make([][]float32, t),
-		logits:  make([]float32, m.Vocab),
+		logits: make([]float32, m.Vocab),
 	}
 	for i := range s.scratch {
 		s.scratch[i] = make([]float32, m.maxCols)
+	}
+	// Предвычислить cos/sin для всех позиций [0, maxCtx).
+	// Размер: 2 × maxCtx × half × 4 байт (для maxCtx=4096, half=64 → 2 МБ).
+	half := m.HeadDim / 2
+	s.cosTable = make([]float32, maxCtx*half)
+	s.sinTable = make([]float32, maxCtx*half)
+	for pos := 0; pos < maxCtx; pos++ {
+		row := pos * half
+		for i, f := range m.invFreq {
+			sn, cs := math.Sincos(float64(pos) * f)
+			s.cosTable[row+i] = float32(cs)
+			s.sinTable[row+i] = float32(sn)
+		}
 	}
 	return s
 }
@@ -105,10 +118,8 @@ func (s *State) Eval(token int, wantLogits bool) ([]float32, error) {
 	scale := float32(1 / math.Sqrt(float64(hd)))
 	pool := m.Pool
 
-	for i, f := range m.invFreq {
-		sn, cs := math.Sincos(float64(pos) * f)
-		s.sin[i], s.cos[i] = float32(sn), float32(cs)
-	}
+	cosPos := s.cosTable[pos*half : (pos+1)*half]
+	sinPos := s.sinTable[pos*half : (pos+1)*half]
 
 	m.Embd.Row(token, s.x)
 
@@ -136,14 +147,14 @@ func (s *State) Eval(token int, wantLogits bool) ([]float32, error) {
 			if b.QNorm != nil {
 				vec.RMSNorm(qh, qh, b.QNorm, m.Eps)
 			}
-			vec.RotateHalf(qh, s.cos[:half], s.sin)
+			vec.RotateHalf(qh, cosPos, sinPos)
 		}
 		for h := 0; h < m.HeadsKV; h++ {
 			kh := kcur[h*hd : (h+1)*hd]
 			if b.KNorm != nil {
 				vec.RMSNorm(kh, kh, b.KNorm, m.Eps)
 			}
-			vec.RotateHalf(kh, s.cos[:half], s.sin)
+			vec.RotateHalf(kh, cosPos, sinPos)
 		}
 
 		kc, vc := s.kc[l], s.vc[l]
