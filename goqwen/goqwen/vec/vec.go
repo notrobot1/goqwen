@@ -20,11 +20,12 @@ import (
 // Активные реализации ядер. По умолчанию — переносимые; init() конкретной
 // архитектуры заменяет их на оптимизированные.
 var (
-	dotImpl          func(a, b []float32) float32          = dotGeneric
-	axpyImpl         func(alpha float32, x, y []float32)   = axpyGeneric
-	dotQ8Impl        func(row []byte, x []float32) float32 = dotQ8Generic
-	rotateHalfImpl   func(x, cos, sin []float32)           = rotateHalfGeneric
-	levelName                                              = "generic"
+	dotImpl        func(a, b []float32) float32                            = dotGeneric
+	axpyImpl       func(alpha float32, x, y []float32)                    = axpyGeneric
+	dotQ8Impl      func(row []byte, x []float32) float32                  = dotQ8Generic
+	rotateHalfImpl func(x, cos, sin []float32)                            = rotateHalfGeneric
+	scaleMulImpl   func(dst, x, weight []float32, scale float32)          = scaleMulGeneric
+	levelName                                                              = "generic"
 	// q8Direct: есть ли прямое SIMD-ядро для строк Q8_0 (без распаковки).
 	q8Direct = false
 	levels   = map[string]func(){"generic": useGeneric}
@@ -33,6 +34,7 @@ var (
 func useGeneric() {
 	dotImpl, axpyImpl, dotQ8Impl = dotGeneric, axpyGeneric, dotQ8Generic
 	rotateHalfImpl = rotateHalfGeneric
+	scaleMulImpl = scaleMulGeneric
 	q8Direct = false
 	levelName = "generic"
 }
@@ -100,11 +102,7 @@ func MatVec(dst, w, x []float32) {
 func RMSNorm(dst, x, weight []float32, eps float32) {
 	ss := Dot(x, x)
 	scale := float32(1 / math.Sqrt(float64(ss/float32(len(x))+eps)))
-	weight = weight[:len(x)]
-	dst = dst[:len(x)]
-	for i, v := range x {
-		dst[i] = v * scale * weight[i]
-	}
+	scaleMulImpl(dst[:len(x)], x, weight[:len(x)], scale)
 }
 
 // Softmax преобразует x в распределение вероятностей на месте.

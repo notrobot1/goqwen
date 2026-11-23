@@ -2,8 +2,9 @@
 
 #include "textflag.h"
 
-// func dotNEON(a, b *float32, n int, acc *[16]float32)
-// n > 0, кратно 16. Четыре независимых аккумулятора по 4 float32.
+// func dotNEON(a, b *float32, n int, acc *[32]float32)
+// n > 0, кратно 32. Восемь независимых аккумуляторов × 4 float32 = 32 частичных суммы.
+// На M1: 2 FMA-юнита × 4-цикловый latency → 8 цепочек полностью заполняют конвейер.
 TEXT ·dotNEON(SB), NOSPLIT, $0-32
 	MOVD a+0(FP), R0
 	MOVD b+8(FP), R1
@@ -13,18 +14,58 @@ TEXT ·dotNEON(SB), NOSPLIT, $0-32
 	VEOR V1.B16, V1.B16, V1.B16
 	VEOR V2.B16, V2.B16, V2.B16
 	VEOR V3.B16, V3.B16, V3.B16
+	VEOR V4.B16, V4.B16, V4.B16
+	VEOR V5.B16, V5.B16, V5.B16
+	VEOR V6.B16, V6.B16, V6.B16
+	VEOR V7.B16, V7.B16, V7.B16
 
 dot_loop:
-	VLD1.P 64(R0), [V4.S4, V5.S4, V6.S4, V7.S4]
+	VLD1.P 64(R0), [V8.S4, V9.S4, V10.S4, V11.S4]
+	VLD1.P 64(R0), [V12.S4, V13.S4, V14.S4, V15.S4]
 	VLD1.P 64(R1), [V16.S4, V17.S4, V18.S4, V19.S4]
-	VFMLA V4.S4, V16.S4, V0.S4
-	VFMLA V5.S4, V17.S4, V1.S4
-	VFMLA V6.S4, V18.S4, V2.S4
-	VFMLA V7.S4, V19.S4, V3.S4
-	SUBS $16, R2, R2
+	VLD1.P 64(R1), [V20.S4, V21.S4, V22.S4, V23.S4]
+	VFMLA V8.S4,  V16.S4, V0.S4
+	VFMLA V9.S4,  V17.S4, V1.S4
+	VFMLA V10.S4, V18.S4, V2.S4
+	VFMLA V11.S4, V19.S4, V3.S4
+	VFMLA V12.S4, V20.S4, V4.S4
+	VFMLA V13.S4, V21.S4, V5.S4
+	VFMLA V14.S4, V22.S4, V6.S4
+	VFMLA V15.S4, V23.S4, V7.S4
+	SUBS $32, R2, R2
 	BNE  dot_loop
 
 	VST1 [V0.S4, V1.S4, V2.S4, V3.S4], (R3)
+	ADD  $64, R3, R3
+	VST1 [V4.S4, V5.S4, V6.S4, V7.S4], (R3)
+	RET
+
+// func scaleMulNEON(dst, x, weight *float32, scale float32, n int)
+// dst[i] = x[i] * scale * weight[i], n > 0, кратно 8.
+TEXT ·scaleMulNEON(SB), NOSPLIT, $0-40
+	MOVD  dst+0(FP), R0
+	MOVD  x+8(FP), R1
+	MOVD  weight+16(FP), R2
+	MOVWU scale+24(FP), R4
+	MOVD  n+32(FP), R3
+	VDUP  R4, V0.S4            // V0 = {scale, scale, scale, scale}
+
+scalemul_loop:
+	VLD1.P 32(R1), [V1.S4, V2.S4]  // x[0:8]
+	VLD1.P 32(R2), [V3.S4, V4.S4]  // weight[0:8]
+	// tmp = x * scale  (используем FMUL через нулевой аккумулятор)
+	VEOR V5.B16, V5.B16, V5.B16
+	VEOR V6.B16, V6.B16, V6.B16
+	VFMLA V1.S4, V0.S4, V5.S4      // V5 = x[0:4] * scale
+	VFMLA V2.S4, V0.S4, V6.S4      // V6 = x[4:8] * scale
+	// dst = tmp * weight
+	VEOR V7.B16, V7.B16, V7.B16
+	VEOR V8.B16, V8.B16, V8.B16
+	VFMLA V5.S4, V3.S4, V7.S4      // V7 = tmp[0:4] * weight[0:4]
+	VFMLA V6.S4, V4.S4, V8.S4      // V8 = tmp[4:8] * weight[4:8]
+	VST1.P [V7.S4, V8.S4], 32(R0)
+	SUBS $8, R3, R3
+	BNE  scalemul_loop
 	RET
 
 // func rotateHalfNEON(xlo, xhi, cos, sin *float32, n int)

@@ -38,6 +38,14 @@ func axpyGeneric(alpha float32, x, y []float32) {
 	}
 }
 
+func scaleMulGeneric(dst, x, weight []float32, scale float32) {
+	weight = weight[:len(x)]
+	dst = dst[:len(x)]
+	for i, v := range x {
+		dst[i] = v * scale * weight[i]
+	}
+}
+
 // dotQ8Generic: строка в формате Q8_0 (блоки по 34 байта: масштаб float16 и
 // 32 значения int8), скалярно умноженная на x.
 func dotQ8Generic(row []byte, x []float32) float32 {
