@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/notrobot1/goqwen/goqwen/internal/llamacpp"
 	"github.com/notrobot1/goqwen/goqwen/internal/nn"
 )
 
@@ -98,7 +99,7 @@ func (m *Model) NewChat(opts *ChatOptions) *Chat {
 		tools:    append([]Tool(nil), o.Tools...),
 		thinking: o.Thinking,
 		rounds:   o.MaxToolRounds,
-		gen:      &generator{model: m, state: m.net.NewState(m.ctx), sampler: newSampler(o.Sampling)},
+		gen:      newGenerator(m, o.Sampling),
 	}
 }
 
@@ -155,6 +156,11 @@ func (c *Chat) Reset() {
 	c.mu.Lock()
 	c.messages = nil
 	c.mu.Unlock()
+}
+
+// Close освобождает KV-кэш этого диалога. После вызова Chat нельзя использовать.
+func (c *Chat) Close() {
+	c.gen.close()
 }
 
 // Send отправляет сообщение пользователя и возвращает ответ модели.
@@ -306,11 +312,37 @@ func (c *Chat) dropOldest() bool {
 }
 
 // generator — цикл генерации поверх состояния модели с KV-кэшем.
+// Поддерживает два бэкенда: чистый Go (state != nil) и llama.cpp (llmCtx != nil).
+// Каждый generator имеет свой независимый KV-кэш — это критично при нескольких
+// параллельных чатах (планировщик + исполнитель делят модель, но не кэш).
 type generator struct {
 	model   *Model
-	state   *nn.State
+	state   *nn.State          // чистый Go бэкенд
+	llmCtx  *llamacpp.Context  // llama.cpp бэкенд: отдельный KV-кэш для каждого чата
 	sampler *sampler
 	cached  []int // токены, уже вычисленные и лежащие в KV-кэше
+	llmPos  int   // текущая позиция в KV-кэше llama.cpp
+}
+
+func newGenerator(m *Model, s *Sampling) *generator {
+	g := &generator{model: m, sampler: newSampler(s)}
+	if m.llm != nil {
+		if ctx, err := m.llm.NewContext(); err == nil {
+			g.llmCtx = ctx
+		}
+	}
+	if g.llmCtx == nil {
+		g.state = m.net.NewState(m.ctx)
+	}
+	return g
+}
+
+// close освобождает KV-кэш чата (не освобождает веса модели).
+func (g *generator) close() {
+	if g.llmCtx != nil {
+		g.llmCtx.Free()
+		g.llmCtx = nil
+	}
 }
 
 type genOutput struct {
@@ -333,9 +365,24 @@ func (g *generator) run(ctx context.Context, prompt []int, onText func(string)) 
 	for p < len(g.cached) && p < len(prompt)-1 && g.cached[p] == prompt[p] {
 		p++
 	}
-	g.state.Truncate(p)
 	g.cached = g.cached[:p]
 	out.cached = p
+
+	// Сбрасываем KV-кэш до общего префикса.
+	if g.llmCtx != nil {
+		g.llmCtx.ClearKVCache(0, p)
+		g.llmPos = p
+	} else {
+		g.state.Truncate(p)
+	}
+
+	// Прогоняем токены промпта через модель.
+	eval := func(token, pos int, wantLogits bool) ([]float32, error) {
+		if g.llmCtx != nil {
+			return g.llmCtx.Decode(int32(token), pos)
+		}
+		return g.state.Eval(token, wantLogits)
+	}
 
 	var logits []float32
 	var err error
@@ -343,13 +390,16 @@ func (g *generator) run(ctx context.Context, prompt []int, onText func(string)) 
 		if err = ctx.Err(); err != nil {
 			return out, err
 		}
-		if logits, err = g.state.Eval(prompt[i], i == len(prompt)-1); err != nil {
+		if logits, err = eval(prompt[i], i, i == len(prompt)-1); err != nil {
 			if errors.Is(err, nn.ErrContextFull) {
 				err = ErrContextOverflow
 			}
 			return out, err
 		}
 		g.cached = append(g.cached, prompt[i])
+		if g.llmCtx != nil {
+			g.llmPos = i + 1
+		}
 	}
 
 	var raw, pending []byte
@@ -383,6 +433,7 @@ func (g *generator) run(ctx context.Context, prompt []int, onText func(string)) 
 			break
 		}
 		out.generated++
+		g.cached = append(g.cached, id)
 		piece := m.tok.Bytes(id)
 		raw = append(raw, piece...)
 
@@ -404,14 +455,21 @@ func (g *generator) run(ctx context.Context, prompt []int, onText func(string)) 
 			pending = append(pending[:0], pending[n:]...)
 		}
 
-		if limit > 0 && out.generated >= limit || g.state.Len() >= g.state.MaxContext() {
+		ctxLen := g.llmPos
+		if g.llmCtx == nil {
+			ctxLen = g.state.Len()
+		}
+		if limit > 0 && out.generated >= limit || ctxLen >= m.ctx {
 			out.finish = "length"
 			break
 		}
-		if logits, err = g.state.Eval(id, true); err != nil {
+		// eval декодирует id на текущей позиции g.llmPos, затем двигаем позицию.
+		if logits, err = eval(id, g.llmPos, true); err != nil {
 			return out, err
 		}
-		g.cached = append(g.cached, id)
+		if g.llmCtx != nil {
+			g.llmPos++
+		}
 	}
 	emit(pending)
 	out.raw = string(raw)

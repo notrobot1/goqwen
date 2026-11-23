@@ -19,9 +19,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"runtime"
 
 	"github.com/notrobot1/goqwen/goqwen/internal/gguf"
+	"github.com/notrobot1/goqwen/goqwen/internal/llamacpp"
 	"github.com/notrobot1/goqwen/goqwen/internal/nn"
 	"github.com/notrobot1/goqwen/goqwen/internal/tokenizer"
 	"github.com/notrobot1/goqwen/goqwen/vec"
@@ -41,6 +43,9 @@ type Options struct {
 	ExpandWeights bool
 	// Progress вызывается при загрузке весов (может быть nil).
 	Progress func(done, total int)
+	// Verbose включает внутренние логи llama.cpp (Metal компиляция шейдеров,
+	// распределение слоёв по GPU и т.д.). По умолчанию выключено.
+	Verbose bool
 }
 
 // Info — сведения о загруженной модели.
@@ -63,6 +68,7 @@ type Info struct {
 // создавать сколько угодно независимых диалогов (Chat).
 type Model struct {
 	net  *nn.Model
+	llm  *llamacpp.Model // llama.cpp backend (nil = чистый Go)
 	tok  *tokenizer.Tokenizer
 	ctx  int
 	stop map[int]bool // токены конца ответа
@@ -103,13 +109,28 @@ func Load(path string, opts *Options) (*Model, error) {
 		return nil, errors.New("goqwen: размер словаря не совпадает с размером матрицы эмбеддингов")
 	}
 
-	m := &Model{net: net, tok: tokenizer.New(tokens, types, merges), stop: map[int]bool{}}
-	m.ctx = o.ContextSize
-	if m.ctx <= 0 {
-		m.ctx = 4096
+	// Вычисляем размер контекста до создания модели.
+	ctxSize := o.ContextSize
+	if ctxSize <= 0 {
+		ctxSize = 4096
 	}
-	if m.ctx > net.CtxTrain {
-		m.ctx = net.CtxTrain
+	if ctxSize > net.CtxTrain {
+		ctxSize = net.CtxTrain
+	}
+
+	m := &Model{net: net, tok: tokenizer.New(tokens, types, merges), stop: map[int]bool{}, ctx: ctxSize}
+
+	// Настраиваем verbosity до загрузки — чтобы подавить логи инициализации.
+	llamacpp.SetVerbose(o.Verbose)
+
+	// Пробуем подключить llama.cpp backend (активен только с -tags llamacpp).
+	// Он берёт инференс на себя (CPU + Metal/CUDA/Vulkan), токенизатор остаётся Go.
+	// При ошибке — молча откатываемся на чистый Go.
+	if llm, lerr := llamacpp.Load(path, ctxSize, o.Threads); lerr == nil {
+		m.llm = llm
+		fmt.Fprintf(os.Stderr, "goqwen: бэкенд llama.cpp (GPU/CPU), ctx=%d\n", ctxSize)
+	} else {
+		fmt.Fprintf(os.Stderr, "goqwen: бэкенд чистый Go (CPU NEON), ctx=%d\n", ctxSize)
 	}
 
 	for _, t := range []string{"<|im_end|>", "<|endoftext|>"} {
@@ -139,6 +160,15 @@ func LoadFromCatalog(ctx context.Context, id string, q Quant, opts *Options, dl 
 		return nil, err
 	}
 	return Load(path, opts)
+}
+
+// Close останавливает фоновые воркеры пула и освобождает GPU-ресурсы.
+// После вызова модель нельзя использовать.
+func (m *Model) Close() {
+	if m.llm != nil {
+		m.llm.Free()
+	}
+	m.net.Pool.Close()
 }
 
 // Info возвращает сведения о модели.
